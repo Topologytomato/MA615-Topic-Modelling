@@ -1,0 +1,199 @@
+---
+title: "Topic_modelling"
+author: "Yirong Yuan"
+date: "2022-11-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set R enviornment 
+
+```{r}
+library(magrittr)
+library(gutenbergr)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(wordcloud)
+library(RColorBrewer)
+library(topicmodels)
+library(ggplot2)
+library(dplyr)
+```
+
+## Importing Data
+
+
+```{r}
+gutenberg_metadata %>%
+  filter(title == "On the Origin of Clockwork, Perpetual Motion Devices, and the Compass")
+book <- gutenberg_download(30001)
+```
+
+## Counting the frequency of whole book's words 
+
+```{r}
+book_df <-book%>%unnest_tokens(word, text)
+
+
+data(stop_words)
+book_df <- book_df %>%
+  anti_join(stop_words)
+
+book_df2 <- book_df
+book_df<-book_df %>%
+  count(word, sort = TRUE) 
+
+book_df <-filter(book_df,!(word %in% c("_ca","de","pp","vol",	
+                                       "a.d","1","al") ))
+
+
+book_df%>% with(wordcloud(word, n, max.words = 50, random.order = FALSE, rot.per = 0.35, 
+                          colors = brewer.pal(8, "Dark2")))
+```
+
+##Separate book by chapters 
+
+```{r}
+chap1num <- grep("Power and Motion Gearing", book$text, ignore.case = F)
+chap2num <- grep("Mechanical Clocks", book$text, ignore.case = F)
+chap3num <- grep("Perpetual Motion and the Clock before de Dondi", book$text, ignore.case = F)
+chap4num <- grep("The Magnetic Compass as a Fellow-traveler from China", book$text, ignore.case = F)
+end <- grep("Chronological Chart", book$text, ignore.case = F)
+chap1 <- book %>% slice(chap1num:chap2num-1)
+chap2 <- book %>% slice(chap2num:chap3num-1)
+chap3 <- book %>% slice(chap3num:chap4num-1)
+chap4 <- book %>% slice(chap4num:end-1)
+chap1$chapter<-rep("Power and Motion Gearing_1",nrow(chap1))
+chap2$chapter<-rep("Mechanical Clocks_2",nrow(chap2))
+chap3$chapter<-rep("Perpetual Motion and the Clock before de Dondi_3",nrow(chap3))
+chap4$chapter<-rep("The Magnetic Compass as a Fellow-traveler from China_4",nrow(chap4))
+chap<-bind_rows(chap1,chap2,chap3,chap4)
+```
+## Visualizing a network of bigrams with ggraph
+
+```{r}
+book_bigrams <- chap %>%  
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) %>%
+  filter(!is.na(bigram)) 
+
+book_bigrams %>%
+  count(bigram, sort = TRUE)
+
+bigrams_separated <- book_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+library(igraph)
+library(ggraph)
+bigram_graph <- bigram_counts %>%
+  filter(n > 20) %>%
+  graph_from_data_frame()
+
+set.seed(2020)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+ 
+```
+
+## LDA on chapters
+
+```{r}
+chap_dtm <- chap %>%
+  unnest_tokens(word, text)
+
+chap_dtm <-filter(chap_dtm,!(word %in% c("_ca","de","pp","vol",	
+                                         "a.d","1","al") ))
+chap_dtm %<>%  anti_join(stop_words) %>%
+  count(chapter, word) %>%
+  cast_dtm(chapter, word, n)
+
+chap_lda <- LDA(chap_dtm, k = 4, control = list(seed = 1234))
+chap_topics<- tidy(chap_lda, matrix ="beta")
+chap_terms <- chap_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 5) %>% 
+  ungroup() %>%
+  arrange(topic -beta)
+chap_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
+##Pre_document classification
+```{r}
+chap_gamma <- tidy(chap_lda, matrix = "gamma")
+chap_gamma <- chap_gamma %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)
+chap_gamma %>%
+  mutate(title = reorder(title, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap(~ title) +
+  labs(x = "topic", y = expression(gamma))
+```
+##By word assignments
+
+```{r}
+
+chap_classifications <- chap_gamma %>%
+  group_by(title, chapter) %>%
+  slice_max(gamma) %>%
+  ungroup()
+
+chap_topics <- chap_classifications %>%
+  count(title, topic) %>%
+  group_by(title) %>%
+  slice_max(n, n = 1) %>% 
+  ungroup() %>%
+  transmute(consensus = title, topic)
+
+chap_classifications %>%
+  inner_join(chap_topics, by = "topic") %>%
+  filter(title != consensus)
+
+assignment <- augment(chap_lda, data = chap_dtm)
+assignment <- assignment %>%
+  separate(document, c("title", "chapter"), 
+           sep = "_", convert = TRUE) %>%
+  inner_join(chap_topics, by = c(".topic" = "topic"))
+
+
+library(scales)
+
+assignment %>%
+  count(title, consensus, wt = count) %>%
+  mutate(across(c(title, consensus), ~str_wrap(., 20))) %>%
+  group_by(title) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(consensus, title, fill = percent)) +
+  geom_tile() +
+  scale_fill_gradient2(high = "darkred", label = percent_format()) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid = element_blank()) +
+  labs(x = "Book words were assigned to",
+       y = "Book words came from",
+       fill = "% of assignments")
+```
+
+
