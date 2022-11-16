@@ -9,6 +9,9 @@ The topic of the project is to explore a text file by using topic modelling. The
 # Main idea
 As the book contains 4 parts, we chose to use topic models with 4 topics to figure out the topics for each part.
 
+# How to get the data?
+We use the gutenberger pakcage to get the data. If you fail to install the package, you can use the bool.csv to load the data.
+
 # Package we used
 ### magrittr
 ### gutenbergr
